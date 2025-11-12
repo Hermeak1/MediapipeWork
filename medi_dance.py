@@ -4,14 +4,11 @@ import mediapipe as mp
 mp_holistic = mp.solutions.holistic
 mp_drawing  = mp.solutions.drawing_utils
 POSE = mp.solutions.pose.PoseLandmark
-
-# ===== 튜닝 파라미터 =====
-DOWNSCALE = 0.6            # 추론용 해상도 축소 비율 (0.5~0.75 권장)
-INFER_EVERY_N = 2          # N프레임에 한 번만 추론 (샘플링)
+DOWNSCALE = 0.6            
+INFER_EVERY_N = 2          
 VIS_THRESH = 0.55          # visibility 임계값
-EMA_ALPHA = 0.35           # 지수평활 계수(0.2~0.5 사이 조정)
+EMA_ALPHA = 0.35          
 
-# ===== 스무딩 상태 =====
 last_landmarks = {}        # {lm_id: (x,y,z,vis)}
 smoothed_landmarks = {}    # EMA 결과 저장
 
@@ -48,37 +45,31 @@ with mp_holistic.Holistic(
         if not ok: break
         h, w = frame.shape[:2]
 
-        # ---- 다운스케일 입력 생성 ----
+        # 다운스케일 입력 생성
         scaled = cv2.resize(frame, (int(w*DOWNSCALE), int(h*DOWNSCALE)))
         rgb = cv2.cvtColor(scaled, cv2.COLOR_BGR2RGB)
         rgb.flags.writeable = False
 
-        # ---- 프레임 샘플링 추론 ----
         run_infer = (frame_id % INFER_EVERY_N == 0)
         if run_infer:
             last_result = holistic.process(rgb)
-        result = last_result  # 나머지 프레임은 직전 결과 재사용
+        result = last_result  
 
-        # ---- 랜드마크 후처리: 가시도 게이팅 + EMA ----
         if result and result.pose_landmarks:
-            # 스케일 되돌림
-            # (주의: lm은 scaled 기준이므로 원본 해상도로 환산)
             for lm_id, lm in enumerate(result.pose_landmarks.landmark):
                 x_px = (lm.x * scaled.shape[1]) / DOWNSCALE
                 y_px = (lm.y * scaled.shape[0]) / DOWNSCALE
                 z_rel = lm.z
                 vis   = lm.visibility
 
-                # visibility 낮으면 이전값 유지(soft hold)
+                # visibility 낮으면 이전값 유지
                 if vis < VIS_THRESH and lm_id in last_landmarks:
                     x_px, y_px, z_rel, vis = last_landmarks[lm_id]
                 else:
-                    # EMA 스무딩
                     x_px, y_px, z_rel, vis = ema_smooth(lm_id, x_px, y_px, z_rel, vis)
 
                 last_landmarks[lm_id] = (x_px, y_px, z_rel, vis)
 
-            # 그리기(원본 프레임 기준)
             mp_drawing.draw_landmarks(
                 frame,
                 result.pose_landmarks,
