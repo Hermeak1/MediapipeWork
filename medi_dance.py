@@ -1,93 +1,98 @@
-import cv2
+import cv2, time, collections, math
 import mediapipe as mp
-import time
-import pandas as pd
 
-from pandas import DataFrame
+mp_holistic = mp.solutions.holistic
+mp_drawing  = mp.solutions.drawing_utils
+POSE = mp.solutions.pose.PoseLandmark
 
+# ===== 튜닝 파라미터 =====
+DOWNSCALE = 0.6            # 추론용 해상도 축소 비율 (0.5~0.75 권장)
+INFER_EVERY_N = 2          # N프레임에 한 번만 추론 (샘플링)
+VIS_THRESH = 0.55          # visibility 임계값
+EMA_ALPHA = 0.35           # 지수평활 계수(0.2~0.5 사이 조정)
 
-mp_drawing=mp.solutions.drawing_utils
-mp_drawing_styles=mp.solutions.drawing_styles
-mp_holistic=mp.solutions.holistic
+# ===== 스무딩 상태 =====
+last_landmarks = {}        # {lm_id: (x,y,z,vis)}
+smoothed_landmarks = {}    # EMA 결과 저장
 
-count = 0
-alldata =[]
+def ema_smooth(lm_id, x, y, z, vis):
+    """지수평활(EMA). 첫 관측은 그대로."""
+    if lm_id not in smoothed_landmarks:
+        smoothed_landmarks[lm_id] = (x, y, z, vis)
+        return x, y, z, vis
+    lx, ly, lz, lv = smoothed_landmarks[lm_id]
+    sx = EMA_ALPHA * x + (1-EMA_ALPHA) * lx
+    sy = EMA_ALPHA * y + (1-EMA_ALPHA) * ly
+    sz = EMA_ALPHA * z + (1-EMA_ALPHA) * lz
+    sv = EMA_ALPHA * vis + (1-EMA_ALPHA) * lv
+    smoothed_landmarks[lm_id] = (sx, sy, sz, sv)
+    return sx, sy, sz, sv
 
-pose_tangan = ['WRIST', 'THUMB_CPC', 'THUMB_MCP', 'THUMB_IP', 'THUMB_TIP', 'INDEX_FINGER_MCP', 'INDEX_FINGER_PIP', 'INDEX_FINGER_DIP', 'INDEX_FINGER_TIP', 'MIDDLE_FINGER_MCP',
-               'MIDDLE_FINGER_PIP', 'MIDDLE_FINGER_DIP', 'MIDDLE_FINGER_TIP', 'RING_FINGER_PIP', 'RING_FINGER_DIP', 'RING_FINGER_TIP',
-               'RING_FINGER_MCP', 'PINKY_MCP', 'PINKY_PIP', 'PINKY_DIP', 'PINKY_TIP']
+def to_pixels(lm, w, h):
+    return lm.x * w, lm.y * h, lm.z, lm.visibility
 
-'''file load'''
 cap = cv2.VideoCapture('dance.mp4')
-background = cv2.VideoCapture('dance.mp4')
+assert cap.isOpened(), "영상 열기 실패"
 
 with mp_holistic.Holistic(
+    model_complexity=1,
     min_detection_confidence=0.5,
-    min_tracking_confidence=0.5) as holistic:
+    min_tracking_confidence=0.5
+) as holistic:
 
-    #posedata coordinate
+    frame_id = 0
+    last_result = None
 
+    while True:
+        ok, frame = cap.read()
+        if not ok: break
+        h, w = frame.shape[:2]
 
-    while cap.isOpened():
-        success, image = cap.read()
-        start = time.time()
-        _,image=cap.read()
-        _,backgroundimage=background.read()
+        # ---- 다운스케일 입력 생성 ----
+        scaled = cv2.resize(frame, (int(w*DOWNSCALE), int(h*DOWNSCALE)))
+        rgb = cv2.cvtColor(scaled, cv2.COLOR_BGR2RGB)
+        rgb.flags.writeable = False
 
-        image = cv2.cvtColor(image,cv2.COLOR_BGR2RGB)
-        image.flags.writeable = False
-        result = holistic.process(image)
-        image.flags.writeable = True
-        image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+        # ---- 프레임 샘플링 추론 ----
+        run_infer = (frame_id % INFER_EVERY_N == 0)
+        if run_infer:
+            last_result = holistic.process(rgb)
+        result = last_result  # 나머지 프레임은 직전 결과 재사용
 
+        # ---- 랜드마크 후처리: 가시도 게이팅 + EMA ----
+        if result and result.pose_landmarks:
+            # 스케일 되돌림
+            # (주의: lm은 scaled 기준이므로 원본 해상도로 환산)
+            for lm_id, lm in enumerate(result.pose_landmarks.landmark):
+                x_px = (lm.x * scaled.shape[1]) / DOWNSCALE
+                y_px = (lm.y * scaled.shape[0]) / DOWNSCALE
+                z_rel = lm.z
+                vis   = lm.visibility
 
+                # visibility 낮으면 이전값 유지(soft hold)
+                if vis < VIS_THRESH and lm_id in last_landmarks:
+                    x_px, y_px, z_rel, vis = last_landmarks[lm_id]
+                else:
+                    # EMA 스무딩
+                    x_px, y_px, z_rel, vis = ema_smooth(lm_id, x_px, y_px, z_rel, vis)
 
-        #print(result.pose_landmarks)
+                last_landmarks[lm_id] = (x_px, y_px, z_rel, vis)
 
-        #얼굴메쉬
-        #mp_drawing.draw_landmarks(image, result.face_landmarks, mp_holistic.FACEMESH_CONTOURS)
-        #왼손
-       # mp_drawing.draw_landmarks(
-       #     image,
-       #     result.left_hand_landmarks,
-       #     mp_holistic.HAND_CONNECTIONS)
-            
-        #오른손
-       # mp_drawing.draw_landmarks(
-       #     image,
-       #     result.right_hand_landmarks,
-       #     mp_holistic.HAND_CONNECTIONS)
-      
-        #바디 포즈
-        mp_drawing.draw_landmarks(
-            image,
-            result.pose_landmarks,
-            mp_holistic.POSE_CONNECTIONS)
+            # 그리기(원본 프레임 기준)
+            mp_drawing.draw_landmarks(
+                frame,
+                result.pose_landmarks,
+                mp_holistic.POSE_CONNECTIONS
+            )
 
-        if result.pose_landmarks:
-            data_tubuh = {}
-            for i in range(len(pose_tangan)):
-                result.pose_landmarks.landmark[i].x = result.pose_landmarks.landmark[i].x * image.shape[0]
-                result.pose_landmarks.landmark[i].y = result.pose_landmarks.landmark[i].y * image.shape[1]
-                data_tubuh.update(
-                    {pose_tangan[i]: result.pose_landmarks.landmark[i]}
-                )
-                alldata.append(data_tubuh)
-
-        #fps 계산
-        end = time.time()
-        totalTime = end - start
-
-        fps = 1 / totalTime
-        print("FPS: ", fps)
-        cv2.putText(image, f'FPS: {int(fps)}', (30,70), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0,255,0),)
-
-
-        cv2.imshow("zumba",image)
-        key=cv2.waitKey(1)
-        if key==ord('q'):
-            df = pd.DataFrame(alldata)
-            df.to_csv("dance_Coordinate.csv")
-            print(alldata)
+        # FPS 표시
+        cv2.putText(frame, f'Frame: {frame_id}', (20, 60),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0,255,0), 2)
+        cv2.imshow("Holistic (smoothed)", frame)
+        if cv2.waitKey(1) & 0xFF == ord('q'):
             break
+
+        frame_id += 1
+
 cap.release()
+cv2.destroyAllWindows()
