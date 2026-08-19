@@ -1,0 +1,3 @@
+# Python 3.9 (Anaconda) 기준
+mediapipe
+opencv-python
